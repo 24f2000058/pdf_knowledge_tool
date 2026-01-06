@@ -25,25 +25,24 @@ An enterprise-ready, local-first RAG (Retrieval-Augmented Generation) pipeline f
 
 ```mermaid
 graph LR
-    subgraph Ingestion ["Document Ingestion"]
-        A[PDF Document] --> B(Docling Parser)
-        B --> C{Extraction}
-        C -->|Layout-aware Text| D(Recursive Chunking)
-        C -->|Tables| E(HTML/Summary Storage)
-        C -->|Images| F(VLM Captioning)
-    end
-
+    %% RAG Pipeline Overview
+    A[PDF<br/>Document] --> B(Docling<br/>Parser)
+    B --> C{Extraction}
+    C --> D["Recursive<br/>Chunking<br/>(Text)"]
+    C --> E["HTML/Summary<br/>(Tables)"]
+    C --> F["VLM Caption<br/>(Images)"]
+    
     D --> G[(ChromaDB)]
-    E --> H[(TinyDB Metadata)]
+    E --> H[(TinyDB<br/>Metadata)]
     F --> G
+    
+    I[User Query] --> J(Search App)
+    J --> K(Retrieval Engine)
+    K --> G & H
+    K --> L["LLM Grounded<br/>Answer"]
 
-    subgraph Retrieval ["User Query & Retrieval"]
-        I(User Query) --> J(Search App)
-        J --> K(Retrieval Engine)
-        K --> G
-        K --> H
-        K --> L(LLM Grounded Answer)
-    end
+    classDef db fill:#e1f5fe,stroke:#01579b,stroke-width:3px
+    class G,H db
 
 ```
 
