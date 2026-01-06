@@ -14,6 +14,10 @@ from docling.document_converter import DocumentConverter
 from transformers import AutoProcessor, AutoModelForCausalLM
 from PIL import Image
 import torch
+import hashlib
+from datetime import datetime
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from schemas import DocumentMetadata, ChunkMetadata
 
 # Setup Logging
 logging.basicConfig(
@@ -51,22 +55,38 @@ class IngestionPipeline:
         self.vlm_ready = False
         if not skip_vlm:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
+            self.dtype = torch.float16 if self.device == "cuda" else torch.float32
             
             logger.info(f"Loading Florence-2 on {self.device}...")
             try:
                 # Use a smaller model for speed locally
                 model_id = "microsoft/Florence-2-base"
                 self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-                self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=self.torch_dtype, trust_remote_code=True).to(self.device)
+                # "eager" attention implementation often bypasses the SDPA check causing the error
+                # Use standard 'dtype' argument
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_id, 
+                    dtype=self.dtype, 
+                    trust_remote_code=True,
+                    attn_implementation="eager" 
+                ).to(self.device)
                 self.vlm_ready = True
             except Exception as e:
-                logger.error(f"Failed to load VLM: {e}. Image captioning will be skipped.")
+                logger.error(f"Failed to load VLM: {e}. Image captioning will be skipped.", exc_info=True)
         else:
             logger.info("Skipping VLM loading as requested.")
 
-    def check_exists(self, output_id: str) -> bool:
-        doc = self.metadata_db.get(Query().pdf_id == output_id)
+    def calculate_file_hash(self, file_path: str) -> str:
+        """Calculate SHA256 hash of the file for delta updates."""
+        sha256_hash = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+
+    def check_exists(self, pdf_hash: str) -> bool:
+        """Check if a file with this hash has already been indexed."""
+        doc = self.metadata_db.get(Query().file_hash == pdf_hash)
         return doc is not None
 
     def run_inference(self, image_path: Path) -> str:
@@ -79,7 +99,7 @@ class IngestionPipeline:
                 image = image.convert("RGB")
             
             prompt = "<MORE_DETAILED_CAPTION>"
-            inputs = self.processor(text=prompt, images=image, return_tensors="pt").to(self.device, self.torch_dtype)
+            inputs = self.processor(text=prompt, images=image, return_tensors="pt").to(self.device, self.dtype)
 
             generated_ids = self.model.generate(
                 input_ids=inputs["input_ids"],
@@ -98,15 +118,24 @@ class IngestionPipeline:
             return "Error generating caption."
 
     def process_pdf(self, pdf_path: str, output_id: str):
-        logger.info(f"Processing PDF: {pdf_path} (ID: {output_id})")
+        # 0. Delta Check (Hash)
+        file_hash = self.calculate_file_hash(pdf_path)
+        if self.check_exists(file_hash):
+             logger.warning(f"Duplicate file detected (Hash: {file_hash}). Skipping ingestion.")
+             return
+
+        logger.info(f"Processing PDF: {pdf_path} (ID: {output_id}) | Hash: {file_hash}")
         
         # 1. Parse PDF
-        conv_res = self.doc_converter.convert(pdf_path)
-        doc = conv_res.document
+        try:
+            conv_res = self.doc_converter.convert(pdf_path)
+            doc = conv_res.document
+        except Exception as e:
+            logger.error(f"Docling conversion failed: {e}")
+            raise e
         
         markdown_text = doc.export_to_markdown()
-        logger.info(f"DEBUG: Markdown Length: {len(markdown_text)}")
-        logger.info(f"DEBUG: Markdown Start: {markdown_text[:100]}")
+        logger.debug(f"Markdown extracted. Length: {len(markdown_text)}")
         
         tables_data = []
 
@@ -115,41 +144,58 @@ class IngestionPipeline:
                 html_content = table.export_to_html()
                 table_text = table.export_to_dataframe().to_string() 
                 
-                tables_data.append({
-                    "index": i,
-                    "html": html_content,
-                    "summary": table_text,
-                    "page": table.prov[0].page_no if table.prov else 1
-                })
+                if html_content and len(html_content.strip()) > 0:
+                    tables_data.append({
+                        "index": i,
+                        "html": html_content,
+                        "summary": table_text,
+                        "page": table.prov[0].page_no if table.prov else 1
+                    })
+                else:
+                    logger.warning(f"Table {i} export resulted in empty HTML. Skipping.")
             except Exception as e:
                 logger.warning(f"Failed to export table {i}: {e}")
 
         # 3. Chunking
+        splitter = RecursiveCharacterTextSplitter(
+            separators=["\n## ", "\n### ", "\n#### ", "\n\n", "\n", " "],
+            chunk_size=1000,
+            chunk_overlap=200,
+        )
+
         chunks = []
-        raw_chunks = markdown_text.split("\n\n")
+        raw_chunks = splitter.split_text(markdown_text)
         logger.info(f"DEBUG: Raw chunks count: {len(raw_chunks)}")
+        
         for i, content in enumerate(raw_chunks):
             logger.info(f"DEBUG: Chunk {i} len: {len(content.strip())} | Content: {content[:20]}...")
-            if len(content.strip()) > 5:
+            chunk_text = content.strip()
+            if len(chunk_text) > 5:
+                # Use Pydantic Schema for Metadata
+                meta = ChunkMetadata(
+                    pdf_id=output_id,
+                    chunk_index=i,
+                    page_number=None, # Docling text splitter doesn't preserve exact page yet easily
+                    data_source="docling_text"
+                )
+                
                 chunks.append({
                     "id": f"{output_id}_text_{i}",
                     "text": content,
-                    "metadata": {
-                        "pdf_id": output_id,
-                        "source": "text",
-                        "chunk_index": i
-                    }
+                    "metadata": meta.model_dump(exclude_none=True)
                 })
         
         for i, tbl in enumerate(tables_data):
+            # Add tables as chunks
             chunks.append({
                 "id": f"{output_id}_table_{i}",
                 "text": f"Table Content:\n{tbl['summary']}",
-                "metadata": {
-                    "pdf_id": output_id,
-                    "source": "table",
-                    "chunk_index": i
-                }
+                 "metadata": ChunkMetadata(
+                    pdf_id=output_id,
+                    chunk_index=i,
+                    data_source="html_table",
+                    page_number=tbl['page']
+                ).model_dump(exclude_none=True)
             })
 
         # 4. Store in Chroma
@@ -166,15 +212,17 @@ class IngestionPipeline:
             logger.info(f"Stored {len(chunks)} chunks in ChromaDB.")
 
         # 5. Store Metadata in TinyDB
-        record = {
-            "pdf_id": output_id,
-            "filename": os.path.basename(pdf_path),
-            "processed_at": time.time(),
-            "tables": tables_data,
-            "full_markdown": markdown_text
-        }
-        self.metadata_db.insert(record)
-        logger.info(f"Stored metadata for {output_id} in TinyDB.")
+        # 5. Store Metadata in TinyDB (Schema Validated)
+        doc_meta = DocumentMetadata(
+            id=output_id,
+            filename=os.path.basename(pdf_path),
+            file_hash=file_hash,
+            total_chunks=len(chunks),
+            tables=[t['html'] for t in tables_data],
+            images=[]
+        )
+        self.metadata_db.insert(doc_meta.model_dump(mode='json'))
+        logger.info(f"Stored valid metadata for {output_id} in TinyDB.")
 
 def main():
     parser = argparse.ArgumentParser(description="Ingest PDF into Knowledge Base")
@@ -186,9 +234,10 @@ def main():
     
     pipeline = IngestionPipeline(skip_vlm=args.skip_vlm)
     
-    if pipeline.check_exists(args.output_id):
-        logger.warning(f"Document {args.output_id} already exists. Skipping.")
-        return
+    # Remove legacy ID duplicate check here, as we do hash check inside process_pdf now
+    # But we can keep an optional ID check if desired, but hash is safer.
+    
+    start_time = time.time()
 
     try:
         pipeline.process_pdf(args.pdf, args.output_id)

@@ -1,82 +1,129 @@
-# PDF Knowledge Tool
+# 📄 PDF Knowledge Retrieval Tool (KRT)
 
-A lightweight pipeline to convert PDFs (including scanned pages) into structured, searchable knowledge using:
-- docling for PDF parsing/layout-aware extraction,
-- TinyDB for document metadata and extracted table/image records,
-- Chroma (local persistent) for vector embeddings and semantic search,
-- transformers-based VLM (optional) for image/chart captioning,
-- Streamlit app for interactive search and indexing.
+An enterprise-ready, local-first RAG (Retrieval-Augmented Generation) pipeline for converting complex PDFs into searchable, interactive knowledge bases. It leverages layout-aware parsing, mixed-protocol metadata storage, and advanced retrieval strategies to provide highly grounded answers from your documents.
 
-What this project does
-- Parses PDF structure and exports document text (docling).
-- Preserves layout/TOC awareness via docling's document model.
-- Splits text into section-aware chunks and stores them as vectors in Chroma.
-- Extracts tables and stores HTML/JSON summaries inside TinyDB (metadata.json).
-- Extracts images to data/images/ and optionally captions them using a VLM (Florence-2 via transformers).
-- Provides a Streamlit search interface (search_app.py) that queries Chroma for semantic hits and shows provenance from TinyDB.
-- Includes a small test suite that verifies end-to-end ingestion and stored artifacts.
+## 🚀 Key Features
 
-Key files
-- ingest.py — main ingestion pipeline
-  - Uses docling.document_converter.DocumentConverter to parse PDFs.
-  - Produces markdown text, extracts tables and images.
-  - Stores tables and full_markdown in TinyDB (`data/metadata.json`).
-  - Adds text chunks and table summaries to a Chroma collection (`data/chroma_db/`).
-  - Optional VLM/image captioning via transformers (model loaded unless `--skip-vlm`).
-- search_app.py — Streamlit UI
-  - Connects to Chroma and TinyDB.
-  - Performs semantic searches against the Chroma collection and renders results (text or table HTML).
-  - Allows uploading a PDF and triggering ingest.py as a subprocess (with `--skip-vlm` toggle).
-- fetch_sample.py — downloads a sample PDF to `tests/sample.pdf`.
-- tests/test_pipeline.py — simple unittest validating ingest → TinyDB → Chroma behavior.
+- **Structural Parsing & OCR**: Powered by [IBM's Docling](https://github.com/DS4SD/docling), extracting precise layout, tables (as HTML/JSON), and text from even scanned or complex multi-column PDFs.
+- **Dual-Store Architecture**:
+  - **ChromaDB**: High-performance persistent vector database for semantic chunk retrieval.
+  - **TinyDB**: Lightweight metadata store for preserving document structure, HTML tables, and high-fidelity artifacts.
+- **Advanced Retrieval Logic**:
+  - **Dynamic Context Windows**: Automatically fetches neighboring chunks (±1) to provide context-rich grounding.
+  - **Query-Aware $K$**: Adjusts retrieval depth based on query complexity (broad vs. specific).
+  - **Hybrid-Ready**: Logic prepared for vector-weighted search with distance-based reranking.
+- **Local Intelligence**:
+  - **LLM Support**: Built-in support for `Qwen2.5-0.5B-Instruct` (Transformers) or any [Ollama](https://ollama.com/) hosted model.
+  - **VLM Captioning**: Optional integration with `Florence-2` for generating detailed captions for charts and images.
+- **Interactive Search Portal**: A feature-rich Streamlit UI with search history, document filtering, and real-time indexing status.
+- **Production Ops**:
+  - **Delta Indexing**: Uses SHA-256 hashing to prevent duplicate processing.
+  - **Automated Backups**: Integrated tool for timestamped snapshots of the knowledge base.
+  - **Structured Schemas**: Strict data validation using Pydantic.
 
-Data stores and locations
-- TinyDB metadata: data/metadata.json (contains records with keys: pdf_id, filename, tables, full_markdown, processed_at).
-- Chroma vector DB: data/chroma_db/ (persistent Chroma client path).
-- Extracted images: data/images/
-Note: .gitignore excludes `data/` so generated DBs are not committed.
+## 🏗️ Architecture & Flow
 
-Quickstart
-1. Create & activate venv:
-   python -m venv .venv
-   source .venv/bin/activate
+```mermaid
+graph TD
+    A[PDF Document] --> B(Docling Parser)
+    B --> C{Extraction}
+    C -->|Layout-aware Text| D[Recursive Chunking]
+    C -->|Tables| E[HTML/Summary Storage]
+    C -->|Images| F[VLM Captioning]
+    
+    D --> G[(ChromaDB)]
+    E --> H[(TinyDB Metadata)]
+    F --> G
+    
+    I[User Query] --> J(Search App)
+    J --> K(Retrieval Engine)
+    K --> G
+    K --> H
+    K --> L[LLM Grounded Answer]
+```
 
-2. Install dependencies:
-   pip install -r requirements.txt
+## 🧠 Retrieval Intelligence
 
-3. Fetch a sample PDF:
-   python fetch_sample.py
+Unlike standard RAG, this tool implements several layers of retrieval logic:
 
-4. Ingest a PDF:
-   python ingest.py --pdf tests/sample.pdf --output-id my_doc_id
-   - Add `--skip-vlm` to avoid loading the VLM (faster, no image captions).
+1.  **Semantic Expansion**: Short queries are automatically expanded using the local LLM to include synonyms and related terms, improving hit rates for specialized terminology.
+2.  **Intent Classification**: The system detects if a query is broad (e.g., "summarize") or specific (e.g., "what is the revenue") and adjusts the number of retrieved chunks ($K$) accordingly.
+3.  **Section Targeting**: Integrated Regex detection prioritizes chunks associated with specific document sections (e.g., "Section 4.2") explicitly mentioned in the query.
+4.  **Context Neighbors**: To solve the "sliced context" problem, the retriever fetches the immediate preceding and succeeding chunks for every semantic hit, ensuring the LLM sees the full narrative flow.
 
-5. Run the Streamlit search UI:
-   streamlit run search_app.py
+## 📂 Project Structure
 
-Testing
-- Run tests with pytest:
-  pytest -q
-- tests call ingest.py and then verify TinyDB and Chroma contents.
+```text
+pdf_knowledge_tool/
+├── ingest.py          # Main ingestion & processing pipeline
+├── search_app.py      # Streamlit-based interactive UI
+├── retrieval.py       # Core search & context expansion logic
+├── models.py          # LLM/VLM interface (Transformers & Ollama)
+├── config.py          # Global settings & model parameters
+├── backup.py          # Data snapshot & recovery tool
+├── schemas.py         # Pydantic data models
+├── data/              # (Local) Persistent DBs & images
+└── backups/           # (Local) Zip archives of knowledge base
+```
 
-Notes on components & behavior
-- PDF parsing & OCR: docling handles layout and can fallback to OCR for scanned pages (ensure OCR dependencies are available if needed).
-- Tables: extracted tables are saved into the TinyDB record for the document (as HTML and summarized text). This keeps tabular data queryable and provable via provenance fields.
-- Images/Charts: saved to data/images/; optional captioning via a transformers VLM (ingest.py attempts to load `microsoft/Florence-2-base` unless `--skip-vlm`).
-- Embeddings & semantic search: ingest.py creates textual chunks and table summaries and stores them in a Chroma collection named `pdf_knowledge`. search_app.py queries Chroma and uses TinyDB for provenance/details.
-- Resources: loading large transformer/VLM models requires sufficient RAM/GPU and network access; use `--skip-vlm` in resource-constrained environments.
+## 🛠️ Setup & Installation
 
-Extensibility ideas
-- Replace TinyDB with MongoDB/Postgres for large-scale table storage and structured queries.
-- Swap local Chroma for a managed vector DB for production scaling.
-- Add language-specific OCR models or advanced denoising for low-quality scans.
-- Improve table-to-schema extraction for precise numeric queries.
+### 1. Environment Preparation
+```bash
+# Create and activate virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# .venv\Scripts\activate   # Windows
+```
 
-Troubleshooting
-- If ingest.py fails to load a VLM, re-run with `--skip-vlm`.
-- Chroma path is `data/chroma_db/` — delete this folder to reset the vector index.
-- TinyDB is a JSON file at `data/metadata.json` — remove it to reset metadata.
+### 2. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+*Note: For GPU acceleration, ensure you have the appropriate `torch` version for your CUDA toolkit.*
 
-License & Contributing
-- Feel free to open issues or PRs. Add tests for pipeline changes and document new external services/deps in README.
+### 3. (Optional) Ollama Setup
+If using the Ollama backend, ensure it is running:
+```bash
+ollama run qwen2.5:0.5b
+```
+
+## 💻 Usage
+
+### Indexing a Document
+Run the ingestion pipeline to process a PDF. The tool checks for duplicates automatically.
+```bash
+python ingest.py --pdf path/to/report.pdf --output-id marketing_q3_2024
+```
+*Use `--skip-vlm` if you want to skip image captioning to save memory/time.*
+
+### Interactive Search
+Launch the Streamlit interface to query your documents and upload new ones on the fly:
+```bash
+streamlit run search_app.py
+```
+
+### Data Management
+Create a snapshot of your current state (Chroma + TinyDB):
+```bash
+python backup.py
+```
+
+## ⚙️ Configuration
+
+Key settings can be adjusted in `config.py` or via environment variables:
+- `LLM_BACKEND`: Switch between `transformers` (local) and `ollama`.
+- `MODEL_NAME`: Defaulting to `Qwen/Qwen2.5-0.5B-Instruct` for a balance of speed and logic.
+- `MAX_CONTEXT_TOKENS`: Controls the window size for RAG context (default 2000).
+- `MIN_SIMILARITY_THRESHOLD`: Filters out noise from vector search.
+
+## 🧪 Testing
+
+The project includes a validation suite to ensure ingestion integrity:
+```bash
+pytest tests/test_pipeline.py
+```
+
+## 📝 License
+This project is for educational and enterprise prototyping purposes. See specific licenses for [Docling](https://github.com/DS4SD/docling) and [ChromaDB](https://github.com/chroma-core/chroma) for third-party terms.
 

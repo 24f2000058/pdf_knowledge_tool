@@ -23,6 +23,7 @@ env/
 # OS files
 .DS_Store
 Thumbs.db
+*:Zone.Identifier
 
 # Tests / coverage
 .pytest_cache/
@@ -44,9 +45,11 @@ data/chroma_db/
 
 # Temporary and output folders
 temp/
+backups/
 
 # Test fixtures / large test data
 tests/data/
+tests/temp_generic_data/
 
 # Logs
 *.log
