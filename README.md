@@ -41,7 +41,7 @@ graph LR
     K --> G & H
     K --> L["LLM Grounded<br/>Answer"]
 
-    classDef db fill:#e1f5fe,stroke:#01579b,stroke-width:3px
+    classDef db fill:#e1f5fe,stroke:#01579b,stroke-width:3px,color:#000
     class G,H db
 
 ```
