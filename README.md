@@ -1,4 +1,4 @@
-# 📄 PDF Knowledge Retrieval Tool (KRT)
+# PDF Knowledge Retrieval Tool
 
 An enterprise-ready, local-first RAG (Retrieval-Augmented Generation) pipeline for converting complex PDFs into searchable, interactive knowledge bases. It leverages layout-aware parsing, mixed-protocol metadata storage, and advanced retrieval strategies to provide highly grounded answers from your documents.
 
@@ -24,22 +24,27 @@ An enterprise-ready, local-first RAG (Retrieval-Augmented Generation) pipeline f
 ## 🏗️ Architecture & Flow
 
 ```mermaid
-graph TD
-    A[PDF Document] --> B(Docling Parser)
-    B --> C{Extraction}
-    C -->|Layout-aware Text| D[Recursive Chunking]
-    C -->|Tables| E[HTML/Summary Storage]
-    C -->|Images| F[VLM Captioning]
-    
+graph LR
+    subgraph Ingestion ["Document Ingestion"]
+        A[PDF Document] --> B(Docling Parser)
+        B --> C{Extraction}
+        C -->|Layout-aware Text| D(Recursive Chunking)
+        C -->|Tables| E(HTML/Summary Storage)
+        C -->|Images| F(VLM Captioning)
+    end
+
     D --> G[(ChromaDB)]
     E --> H[(TinyDB Metadata)]
     F --> G
-    
-    I[User Query] --> J(Search App)
-    J --> K(Retrieval Engine)
-    K --> G
-    K --> H
-    K --> L[LLM Grounded Answer]
+
+    subgraph Retrieval ["User Query & Retrieval"]
+        I(User Query) --> J(Search App)
+        J --> K(Retrieval Engine)
+        K --> G
+        K --> H
+        K --> L(LLM Grounded Answer)
+    end
+
 ```
 
 ## 🧠 Retrieval Intelligence
