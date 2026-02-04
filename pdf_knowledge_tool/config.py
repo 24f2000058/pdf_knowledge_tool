@@ -29,10 +29,20 @@ USE_RERANKER = os.getenv("USE_RERANKER", "false").lower() in ("true", "1", "yes"
 # Minimum vector similarity score to consider a chunk relevant
 MIN_SIMILARITY_THRESHOLD = float(os.getenv("MIN_SIMILARITY_THRESHOLD", "0.2"))
 
+# --- Preview Configuration ---
+# Enable/Disable Docling Page Previews
+ENABLE_PAGE_PREVIEWS = os.getenv("ENABLE_PAGE_PREVIEWS", "true").lower() in ("true", "1", "yes")
+
+# Max pages to render per document to avoid storage bloat
+PREVIEW_MAX_PAGES = int(os.getenv("PREVIEW_MAX_PAGES", "30"))
+
 # Ollama API URL
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
 
+from pathlib import Path
+
 # --- Paths ---
-DATA_DIR = "./data"
-METADATA_DB_PATH = os.path.join(DATA_DIR, "metadata.json")
-CHROMA_DB_PATH = os.path.join(DATA_DIR, "chroma_db")
+DATA_DIR = Path("./data")
+METADATA_DB_PATH = DATA_DIR / "metadata.json"
+CHROMA_DB_PATH = DATA_DIR / "chroma_db"
+IMAGES_DIR = DATA_DIR / "images"

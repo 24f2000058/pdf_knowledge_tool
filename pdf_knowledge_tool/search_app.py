@@ -52,17 +52,83 @@ if not db_connected:
 # Navigation (Persistent State)
 mode = st.radio("Mode", ["🔎 Search", "📤 Upload & Index"], horizontal=True, label_visibility="collapsed")
 
-# --- SIDEBAR: SEARCH HISTORY & FILTERS ---
+# --- DELETION LOGIC ---
+def delete_document(pdf_id):
+    """
+    Surgically removes a document from:
+    1. ChromaDB (chunks)
+    2. TinyDB (metadata)
+    3. Filesystem (images)
+    """
+    try:
+        # 1. ChromaDB
+        collection.delete(where={"pdf_id": pdf_id})
+        
+        # 2. TinyDB
+        metadata_db.remove(Query().id == pdf_id)
+        
+        # 3. Images
+        # Pattern: {pdf_id}_page_*.jpg
+        # Safety: Ensure pdf_id is valid to avoid wildcard disasters
+        if pdf_id and len(pdf_id) > 1:
+            for img_file in config.IMAGES_DIR.glob(f"{pdf_id}_page_*.jpg"):
+                img_file.unlink(missing_ok=True)
+                
+        return True, "Deletion Successful."
+    except Exception as e:
+        return False, f"Deletion Failed: {e}"
+
+# --- SIDEBAR: SEARCH HISTORY, FILTERS, ADMIN ---
 if "history" not in st.session_state:
     st.session_state.history = []
+
+if "is_ingesting" not in st.session_state:
+    st.session_state.is_ingesting = False
 
 with st.sidebar:
     st.subheader("🔍 Filters")
     # Filters
     all_docs = metadata_db.all()
-    all_ids = [d.get('pdf_id', 'unknown') for d in all_docs]
-    selected_ids = st.multiselect("Filter by Document:", all_ids)
+    # Create map of ID -> Filename for display
+    doc_map = {d['id']: d.get('filename', d['id']) for d in all_docs}
+    all_ids = list(doc_map.keys())
     
+    selected_ids = st.multiselect("Filter by Document:", all_ids, format_func=lambda x: doc_map.get(x, x))
+    
+    st.divider()
+    
+    # --- ADMIN SECTION ---
+    with st.expander("⚙️ Manage Knowledge Base"):
+        st.caption("Delete Documents")
+        if not all_ids:
+            st.info("No documents to manage.")
+        else:
+            doc_to_delete = st.selectbox("Select Document", all_ids, format_func=lambda x: doc_map.get(x, x), key="del_select")
+            
+            # Disable delete if ingesting
+            if st.session_state.is_ingesting:
+                st.warning("Cannot delete while ingesting.")
+            else:
+                if st.button("🗑️ Delete Document", type="primary"):
+                    success, msg = delete_document(doc_to_delete)
+                    if success:
+                        st.success(msg)
+                        st.cache_resource.clear()
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        
+        st.divider()
+        st.caption("System Tools")
+        if st.button("📦 Create Backup"):
+            # Import locally to avoid top-level issues
+            import backup
+            try:
+                zip_path = backup.create_backup()
+                st.success(f"Backup created: {os.path.basename(zip_path)}")
+            except Exception as e:
+                st.error(f"Backup failed: {e}")
+
     st.divider()
     st.subheader("📜 Search History")
     for h in st.session_state.history[-5:]: # Show last 5
@@ -164,28 +230,39 @@ if mode == "🔎 Search":
                             source_type = meta.get('source', 'text')
                             page_num = meta.get('page', '?')
                             
-                            st.markdown(f"**Source {i+1}** | {pdf_id} (Page {page_num}) | Score: {score:.2f}")
+                            col1, col2 = st.columns([0.7, 0.3])
                             
-                            # Full Doc Context (for Images/Tables)
-                            full_doc = metadata_db.get(Query().pdf_id == pdf_id)
-                            
-                            if source_type == 'table':
-                                st.caption("Found in Table:")
-                                chunk_index = meta.get('chunk_index')
-                                if full_doc and 'tables' in full_doc:
-                                    tables = full_doc['tables']
-                                    if chunk_index is not None and chunk_index < len(tables):
-                                        table_html = tables[chunk_index]['html']
-                                        if table_html:
-                                            st.html(table_html)
+                            with col1:
+                                st.markdown(f"**Source {i+1}** | {doc_map.get(pdf_id, pdf_id)} (Page {page_num}) | Score: {score:.2f}")
+                                
+                                # Full Doc Context for Tables
+                                full_doc = metadata_db.get(Query().id == pdf_id)
+                                
+                                if source_type == 'table':
+                                    st.caption("Found in Table:")
+                                    chunk_index = meta.get('chunk_index')
+                                    if full_doc and 'tables' in full_doc:
+                                        tables = full_doc['tables']
+                                        if chunk_index is not None and chunk_index < len(tables):
+                                            table_html = tables[chunk_index]['html']
+                                            if table_html:
+                                                st.html(table_html)
+                                            else:
+                                                st.text(doc_text)
                                         else:
                                             st.text(doc_text)
+                                else:
+                                    st.text(doc_text)
+                            
+                            with col2:
+                                # Image Preview Logic
+                                # images/{pdf_id}_page_{page_num}.jpg
+                                if page_num != '?':
+                                    img_path = config.IMAGES_DIR / f"{pdf_id}_page_{page_num}.jpg"
+                                    if img_path.exists():
+                                        st.image(str(img_path), caption=f"Page {page_num} Preview", use_container_width=True)
                                     else:
-                                        st.text(doc_text)
-                            else:
-                                st.text(doc_text)
-                                # Image Preview (Fallback logic)
-                                # In future: Check if page has image in images/ folder
+                                        st.caption("No Preview Available")
                             
                             st.divider()
 
@@ -198,6 +275,8 @@ elif mode == "📤 Upload & Index":
     
     if st.button("Index PDF", type="primary"):
         if uploaded_file and doc_id:
+            st.session_state.is_ingesting = True # Lock
+            
             temp_dir = Path("./temp")
             temp_dir.mkdir(exist_ok=True)
             temp_path = temp_dir / uploaded_file.name
@@ -210,9 +289,12 @@ elif mode == "📤 Upload & Index":
             
             with st.status("Indexing...", expanded=True) as status:
                 result = subprocess.run(cmd, capture_output=True, text=True)
+                st.session_state.is_ingesting = False # Unlock
+                
                 if result.returncode == 0:
                     status.update(label="Complete!", state="complete")
                     st.success("✅ Document Indexed.")
+                    st.cache_resource.clear() # Clear cache to refresh stats
                 else:
                     status.update(label="Failed", state="error")
                     st.error("❌ Ingestion Failed")

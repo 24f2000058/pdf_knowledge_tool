@@ -1,4 +1,4 @@
-# PDF Knowledge Retrieval Tool
+# 📄 PDF Knowledge Retrieval Tool
 
 An enterprise-ready, local-first RAG (Retrieval-Augmented Generation) pipeline for converting complex PDFs into searchable, interactive knowledge bases. It leverages layout-aware parsing, mixed-protocol metadata storage, and advanced retrieval strategies to provide highly grounded answers from your documents.
 
@@ -20,6 +20,15 @@ An enterprise-ready, local-first RAG (Retrieval-Augmented Generation) pipeline f
   - **Delta Indexing**: Uses SHA-256 hashing to prevent duplicate processing.
   - **Automated Backups**: Integrated tool for timestamped snapshots of the knowledge base.
   - **Structured Schemas**: Strict data validation using Pydantic.
+
+  ## ⏳ Current Status
+
+- **Pipeline:** Core ingestion and retrieval modules (`ingest.py`, `retrieval.py`, `models.py`) are implemented inside the python package `pdf_knowledge_tool/` (see Project Structure). They are ready for local experimentation.
+- **Data:** A persistent Chroma DB is created under `pdf_knowledge_tool/data/chroma_db` by default when running the package tools.
+- **UI:** The Streamlit interface lives at `pdf_knowledge_tool/search_app.py`.
+- **Tests:** Unit tests live in `pdf_knowledge_tool/tests`. Run `pytest` from the repository root to execute them.
+- **Integrations:** External systems (Docling, Ollama, Florence-2) remain optional and must be installed or started separately when used.
+- **Backups:** Use `backup.py` inside the package to create timestamped snapshots stored in `pdf_knowledge_tool/backups/`.
 
 ## 🏗️ Architecture & Flow
 
@@ -57,17 +66,26 @@ Unlike standard RAG, this tool implements several layers of retrieval logic:
 
 ## 📂 Project Structure
 
+Repository layout (runtime code is packaged under pdf_knowledge_tool/):
+
 ```text
-pdf_knowledge_tool/
-├── ingest.py          # Main ingestion & processing pipeline
-├── search_app.py      # Streamlit-based interactive UI
-├── retrieval.py       # Core search & context expansion logic
-├── models.py          # LLM/VLM interface (Transformers & Ollama)
-├── config.py          # Global settings & model parameters
-├── backup.py          # Data snapshot & recovery tool
-├── schemas.py         # Pydantic data models
-├── data/              # (Local) Persistent DBs & images
-└── backups/           # (Local) Zip archives of knowledge base
+pdf_knowledge_tool/                # repository root
+├── README.md
+├── requirements.txt
+├── fetch_sample.py                # helper to download sample test PDF
+├── tests/                         # repository-level test helpers/fixtures
+│   └── ...
+└── pdf_knowledge_tool/            # python package / runtime code
+    ├── __init__.py
+    ├── ingest.py          # Main ingestion & processing pipeline (run as module)
+    ├── search_app.py      # Streamlit-based interactive UI (file inside package)
+    ├── retrieval.py       # Core search & context expansion logic
+    ├── models.py          # LLM/VLM interface (Transformers & Ollama)
+    ├── config.py          # Global settings & model parameters
+    ├── backup.py          # Data snapshot & recovery tool
+    ├── schemas.py         # Pydantic data models
+    ├── data/              # (Local) Persistent DBs & images (created at runtime)
+    └── backups/           # (Local) Zip archives of knowledge base
 ```
 
 ## 🛠️ Setup & Installation
@@ -97,20 +115,23 @@ ollama run qwen2.5:0.5b
 ### Indexing a Document
 Run the ingestion pipeline to process a PDF. The tool checks for duplicates automatically.
 ```bash
-python ingest.py --pdf path/to/report.pdf --output-id marketing_q3_2024
+# from the repository root, run the ingestion module
+python -m pdf_knowledge_tool.ingest --pdf path/to/report.pdf --output-id marketing_q3_2024
 ```
 *Use `--skip-vlm` if you want to skip image captioning to save memory/time.*
 
 ### Interactive Search
 Launch the Streamlit interface to query your documents and upload new ones on the fly:
 ```bash
-streamlit run search_app.py
+# run from repository root
+streamlit run pdf_knowledge_tool/search_app.py
 ```
 
 ### Data Management
 Create a snapshot of your current state (Chroma + TinyDB):
 ```bash
-python backup.py
+# from repository root
+python -m pdf_knowledge_tool.backup
 ```
 
 ## ⚙️ Configuration

@@ -10,14 +10,13 @@ from typing import List, Dict, Any
 # Third-party imports
 from tinydb import TinyDB, Query
 import chromadb
-from docling.document_converter import DocumentConverter
-from transformers import AutoProcessor, AutoModelForCausalLM
-from PIL import Image
-import torch
-import hashlib
-from datetime import datetime
+import config
+from docling.document_converter import DocumentConverter, PdfFormatOption, InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.chunking import HybridChunker
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from schemas import DocumentMetadata, ChunkMetadata
+import hashlib  # Ensure hashlib is imported
 
 # Setup Logging
 logging.basicConfig(
@@ -43,38 +42,23 @@ IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 class IngestionPipeline:
     def __init__(self, skip_vlm=False):
-        self.doc_converter = DocumentConverter()
+        # Configure Pipeline Options for Previews
+        pipeline_options = PdfPipelineOptions()
+        if config.ENABLE_PAGE_PREVIEWS:
+            pipeline_options.generate_page_images = True
+            pipeline_options.images_scale = 1.0 # Standard resolution
+        
+        self.doc_converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
         
         # Initialize Databases
         logger.info("Initializing Databases...")
         self.metadata_db = TinyDB(METADATA_DB_PATH)
         self.chroma_client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
         self.collection = self.chroma_client.get_or_create_collection(name=COLLECTION_NAME)
-        
-        # Initialize VLM (Florence-2)
-        self.vlm_ready = False
-        if not skip_vlm:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.dtype = torch.float16 if self.device == "cuda" else torch.float32
-            
-            logger.info(f"Loading Florence-2 on {self.device}...")
-            try:
-                # Use a smaller model for speed locally
-                model_id = "microsoft/Florence-2-base"
-                self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-                # "eager" attention implementation often bypasses the SDPA check causing the error
-                # Use standard 'dtype' argument
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_id, 
-                    dtype=self.dtype, 
-                    trust_remote_code=True,
-                    attn_implementation="eager" 
-                ).to(self.device)
-                self.vlm_ready = True
-            except Exception as e:
-                logger.error(f"Failed to load VLM: {e}. Image captioning will be skipped.", exc_info=True)
-        else:
-            logger.info("Skipping VLM loading as requested.")
 
     def calculate_file_hash(self, file_path: str) -> str:
         """Calculate SHA256 hash of the file for delta updates."""
@@ -88,34 +72,6 @@ class IngestionPipeline:
         """Check if a file with this hash has already been indexed."""
         doc = self.metadata_db.get(Query().file_hash == pdf_hash)
         return doc is not None
-
-    def run_inference(self, image_path: Path) -> str:
-        if not self.vlm_ready:
-            return "Image captioning unavailable."
-        
-        try:
-            image = Image.open(image_path)
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-            
-            prompt = "<MORE_DETAILED_CAPTION>"
-            inputs = self.processor(text=prompt, images=image, return_tensors="pt").to(self.device, self.dtype)
-
-            generated_ids = self.model.generate(
-                input_ids=inputs["input_ids"],
-                pixel_values=inputs["pixel_values"],
-                max_new_tokens=1024,
-                num_beams=3,
-                do_sample=False
-            )
-            
-            generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
-            parsed_answer = self.processor.post_process_generation(generated_text, task=prompt, image_size=(image.width, image.height))
-            return parsed_answer.get(prompt, "No caption generated.")
-            
-        except Exception as e:
-            logger.error(f"Error captioning image {image_path}: {e}")
-            return "Error generating caption."
 
     def process_pdf(self, pdf_path: str, output_id: str):
         # 0. Delta Check (Hash)
@@ -133,6 +89,24 @@ class IngestionPipeline:
         except Exception as e:
             logger.error(f"Docling conversion failed: {e}")
             raise e
+
+        # Save Page Previews (if enabled and present)
+        if config.ENABLE_PAGE_PREVIEWS:
+            saved_images_count = 0
+            for i, page in enumerate(doc.pages.values()):
+                if saved_images_count >= config.PREVIEW_MAX_PAGES:
+                    break
+                    
+                if hasattr(page, 'image') and page.image and page.image.pil_image:
+                    image_path = IMAGES_DIR / f"{output_id}_page_{page.page_no}.jpg"
+                    try:
+                        page.image.pil_image.save(image_path, "JPEG")
+                        saved_images_count += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to save preview for page {page.page_no}: {e}")
+            
+            if saved_images_count > 0:
+                logger.info(f"Saved {saved_images_count} page previews.")
         
         markdown_text = doc.export_to_markdown()
         logger.debug(f"Markdown extracted. Length: {len(markdown_text)}")
@@ -156,34 +130,47 @@ class IngestionPipeline:
             except Exception as e:
                 logger.warning(f"Failed to export table {i}: {e}")
 
-        # 3. Chunking
-        splitter = RecursiveCharacterTextSplitter(
-            separators=["\n## ", "\n### ", "\n#### ", "\n\n", "\n", " "],
-            chunk_size=1000,
-            chunk_overlap=200,
-        )
-
-        chunks = []
-        raw_chunks = splitter.split_text(markdown_text)
-        logger.info(f"DEBUG: Raw chunks count: {len(raw_chunks)}")
+        # 3. Chunking (Native Docling with Provenance)
+        # Using default HybridChunker configuration which is generally robust
+        chunker = HybridChunker()
         
-        for i, content in enumerate(raw_chunks):
-            logger.info(f"DEBUG: Chunk {i} len: {len(content.strip())} | Content: {content[:20]}...")
-            chunk_text = content.strip()
-            if len(chunk_text) > 5:
-                # Use Pydantic Schema for Metadata
-                meta = ChunkMetadata(
-                    pdf_id=output_id,
-                    chunk_index=i,
-                    page_number=None, # Docling text splitter doesn't preserve exact page yet easily
-                    data_source="docling_text"
-                )
-                
-                chunks.append({
-                    "id": f"{output_id}_text_{i}",
-                    "text": content,
-                    "metadata": meta.model_dump(exclude_none=True)
-                })
+        chunks = []
+        doc_chunks = list(chunker.chunk(doc))
+        logger.info(f"DEBUG: Docling generated {len(doc_chunks)} chunks")
+        
+        for i, chunk in enumerate(doc_chunks):
+            chunk_text = chunk.text.strip()
+            if not chunk_text:
+                continue
+            
+            # Extract Page Number from Provenance
+            # Docling chunks can span pages, usually take the first item's page
+            page = 1
+            if chunk.meta.doc_items:
+                # prov is a list of ProvenanceItem
+                first_item = chunk.meta.doc_items[0]
+                if hasattr(first_item, 'prov') and first_item.prov:
+                     # prov is list of Prov items, take first
+                     page = first_item.prov[0].page_no
+            elif hasattr(chunk.meta, 'provenance') and chunk.meta.provenance: 
+                # Fallback for different docling constraints
+                page = chunk.meta.provenance[0].page_no
+
+            logger.info(f"DEBUG: Chunk {i} | Page: {page} | Len: {len(chunk_text)}")
+
+            # Use Pydantic Schema for Metadata
+            meta = ChunkMetadata(
+                pdf_id=output_id,
+                chunk_index=i,
+                page_number=page,
+                data_source="docling_text"
+            )
+            
+            chunks.append({
+                "id": f"{output_id}_text_{i}",
+                "text": chunk_text,
+                "metadata": meta.model_dump(exclude_none=True)
+            })
         
         for i, tbl in enumerate(tables_data):
             # Add tables as chunks
