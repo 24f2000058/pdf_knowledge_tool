@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Data (Mounted via Volume)
+data/
+# Exception: We might want to keep the directory structure, but generally data/ is ignored in context
+# if we mount it. However, if we want to copy initial seed data, we might not ignore it.
+# Given the user wants persistence via volume, ignoring local data/ in build context is safer
+# to avoid overwriting mounted volume or bloating image.
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+docker-compose.yml
+Dockerfile
+.dockerignore
+README_DOCKER.md
